@@ -56,7 +56,13 @@ func TestGenerateSmartJSON(t *testing.T) {
 		}
 		// Logic: Rating > (min - 1)
 		if rule.Name == "rating" && rule.Operator == "gt" {
-			foundRating = true
+			// JSON unmarshals numbers as float64
+			expectedValue := float64(rating - 1)
+			if ruleValue, ok := rule.Value.(float64); ok && ruleValue == expectedValue {
+				foundRating = true
+			} else {
+				t.Errorf("Rating rule value incorrect. Expected: %v, Got: %v", expectedValue, rule.Value)
+			}
 		}
 	}
 

@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,9 +48,11 @@ type SubsonicClient struct {
 }
 
 // GenerateAuthParams creates the required Subsonic auth tokens (u, t, s)
-func (c *SubsonicClient) GenerateAuthParams() string {
+func (c *SubsonicClient) GenerateAuthParams() (string, error) {
 	saltBytes := make([]byte, 6)
-	rand.Read(saltBytes)
+	if _, err := rand.Read(saltBytes); err != nil {
+		return "", fmt.Errorf("failed to generate random salt: %w", err)
+	}
 	salt := hex.EncodeToString(saltBytes)
 	
 	tokenRaw := c.Password + salt
@@ -59,7 +61,7 @@ func (c *SubsonicClient) GenerateAuthParams() string {
 	token := hex.EncodeToString(hasher.Sum(nil))
 	
 	// API version 1.16.1 is standard for modern Navidrome
-	return fmt.Sprintf("u=%s&t=%s&s=%s&v=1.16.1&c=SmartyP", c.Username, token, salt)
+	return fmt.Sprintf("u=%s&t=%s&s=%s&v=1.16.1&c=SmartyP", c.Username, token, salt), nil
 }
 
 // GenerateSmartJSON constructs the playlist definition.
@@ -112,10 +114,14 @@ func GetFolders(root string) ([]string, error) {
 			
 			// Tier 2 logic for Xmas
 			if entry.Name() == "Xmas" {
-				subs, _ := os.ReadDir(fullPath)
-				for _, sub := range subs {
-					if sub.IsDir() && !strings.HasPrefix(sub.Name(), ".") {
-						folders = append(folders, filepath.Join(fullPath, sub.Name()))
+				subs, subErr := os.ReadDir(fullPath)
+				if subErr != nil {
+					log.Printf("Warning: failed to read Xmas subdirectories: %v", subErr)
+				} else {
+					for _, sub := range subs {
+						if sub.IsDir() && !strings.HasPrefix(sub.Name(), ".") {
+							folders = append(folders, filepath.Join(fullPath, sub.Name()))
+						}
 					}
 				}
 			}
@@ -124,13 +130,37 @@ func GetFolders(root string) ([]string, error) {
 	return folders, nil
 }
 
+// getAllowedOrigins returns the list of allowed CORS origins from environment or defaults
+func getAllowedOrigins() []string {
+	if origins := os.Getenv("CORS_ALLOWED_ORIGINS"); origins != "" {
+		return strings.Split(origins, ",")
+	}
+	// Default allowlist for development
+	return []string{"http://localhost:3000", "http://localhost:5173"}
+}
+
+// isOriginAllowed checks if the given origin is in the allowlist
+func isOriginAllowed(origin string, allowlist []string) bool {
+	for _, allowed := range allowlist {
+		if strings.TrimSpace(allowed) == origin {
+			return true
+		}
+	}
+	return false
+}
+
 // enableCors middleware to allow the React frontend to talk to Go
 func enableCors(next http.HandlerFunc) http.HandlerFunc {
+	allowedOrigins := getAllowedOrigins()
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		if origin != "" && isOriginAllowed(origin, allowedOrigins) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		next(w, r)
@@ -173,10 +203,17 @@ func main() {
 			}
 		}
 		
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(relativeFolders)
 	}))
 
 	http.HandleFunc("/api/generate", enableCors(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 		var req struct {
 			Name      string `json:"name"`
 			Path      string `json:"path"`
@@ -199,5 +236,7 @@ func main() {
 	}))
 
 	fmt.Println("SmartyP Server starting on :8080...")
-	http.ListenAndServe(":8080", nil)
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
 }

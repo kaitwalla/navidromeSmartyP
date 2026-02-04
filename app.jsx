@@ -11,7 +11,7 @@ const App = () => {
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
 
-  const API_BASE = 'http://localhost:8080/api';
+  const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
   useEffect(() => {
     fetchFolders();
@@ -43,7 +43,7 @@ const App = () => {
       const payload = {
         name: playlistName,
         path: selectedFolder,
-        minRating: parseInt(minRating)
+        minRating: minRating
       };
 
       const response = await fetch(`${API_BASE}/generate`, {
@@ -64,15 +64,25 @@ const App = () => {
     }
   };
 
-  const copyToClipboard = () => {
-    const textArea = document.createElement("textarea");
-    textArea.value = generatedJson;
-    document.body.appendChild(textArea);
-    textArea.select();
-    document.execCommand('copy');
-    document.body.removeChild(textArea);
-    setStatus('Copied to clipboard!');
-    setTimeout(() => setStatus(''), 2000);
+  const copyToClipboard = async () => {
+    try {
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(generatedJson);
+      } else {
+        // Fallback for browsers without Clipboard API
+        const textArea = document.createElement("textarea");
+        textArea.value = generatedJson;
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+      setStatus('Copied to clipboard!');
+      setTimeout(() => setStatus(''), 2000);
+    } catch (error) {
+      setStatus(`Copy failed: ${error.message}`);
+      setTimeout(() => setStatus(''), 3000);
+    }
   };
 
   return (
@@ -89,7 +99,8 @@ const App = () => {
               <p className="text-slate-400 text-sm">Navidrome Smart Playlist Utility</p>
             </div>
           </div>
-          <button 
+          <button
+            type="button"
             onClick={fetchFolders}
             className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400"
             title="Rescan Folders"
@@ -116,9 +127,10 @@ const App = () => {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">Playlist Name</label>
-                  <input 
-                    type="text" 
+                  <label htmlFor="playlist-name" className="block text-sm font-medium text-slate-400 mb-1">Playlist Name</label>
+                  <input
+                    id="playlist-name"
+                    type="text"
                     value={playlistName}
                     onChange={(e) => setPlaylistName(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
@@ -127,9 +139,10 @@ const App = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1">Target Folder (Path)</label>
+                  <label htmlFor="target-folder" className="block text-sm font-medium text-slate-400 mb-1">Target Folder (Path)</label>
                   <div className="relative">
-                    <select 
+                    <select
+                      id="target-folder"
                       value={selectedFolder}
                       onChange={(e) => setSelectedFolder(e.target.value)}
                       disabled={folders.length === 0}
@@ -145,16 +158,17 @@ const App = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-1 flex justify-between">
+                  <label htmlFor="min-rating" className="block text-sm font-medium text-slate-400 mb-1 flex justify-between">
                     Minimum Rating
                     <span className="text-indigo-400 font-bold">{minRating} Stars</span>
                   </label>
-                  <input 
-                    type="range" 
-                    min="1" 
-                    max="5" 
+                  <input
+                    id="min-rating"
+                    type="range"
+                    min="1"
+                    max="5"
                     value={minRating}
-                    onChange={(e) => setMinRating(e.target.value)}
+                    onChange={(e) => setMinRating(Number(e.target.value))}
                     className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                   />
                   <div className="flex justify-between text-[10px] text-slate-500 mt-1 uppercase font-bold px-1">
@@ -165,7 +179,8 @@ const App = () => {
                 </div>
               </div>
 
-              <button 
+              <button
+                type="button"
                 onClick={handleGenerate}
                 disabled={loading}
                 className="w-full mt-8 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg active:scale-[0.98]"
@@ -193,7 +208,8 @@ const App = () => {
                 JSON Output
               </h2>
               {generatedJson && (
-                <button 
+                <button
+                  type="button"
                   onClick={copyToClipboard}
                   className="text-xs text-indigo-400 hover:text-indigo-300 font-bold uppercase tracking-wider"
                 >
