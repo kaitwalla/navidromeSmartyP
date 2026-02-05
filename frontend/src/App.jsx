@@ -30,7 +30,7 @@ const App = () => {
       console.error("Failed to fetch folders", err);
       setError("Failed to connect to SmartyP backend. Is it running on :8080?");
       // Fallback for UI visualization only
-      setFolders(["(Mock) Rock", "(Mock) Jazz"]); 
+      setFolders(["(Mock) Rock", "(Mock) Jazz"]);
     } finally {
       setLoading(false);
     }
@@ -193,8 +193,8 @@ const App = () => {
             <div className="bg-indigo-900/20 p-4 rounded-lg border border-indigo-500/30 flex gap-3 text-sm text-indigo-200">
               <Info size={20} className="shrink-0 text-indigo-400" />
               <p>
-                Navidrome smart playlists are JSON files. After generating, save this output to your Navidrome 
-                <code className="bg-indigo-900/40 px-1 rounded ml-1">playlists/</code> directory as 
+                Navidrome smart playlists are JSON files. After generating, save this output to your Navidrome
+                <code className="bg-indigo-900/40 px-1 rounded ml-1">playlists/</code> directory as
                 <code className="bg-indigo-900/40 px-1 rounded ml-1">.json</code>.
               </p>
             </div>
@@ -217,7 +217,7 @@ const App = () => {
                 </button>
               )}
             </div>
-            
+
             <div className="flex-grow bg-slate-950 rounded-xl border border-slate-800 p-4 font-mono text-sm overflow-auto min-h-[300px] shadow-inner relative group">
               {generatedJson ? (
                 <pre className="text-emerald-400 whitespace-pre-wrap">{generatedJson}</pre>
@@ -227,7 +227,7 @@ const App = () => {
                   <p>Configure filters and click generate to see the Navidrome smart playlist definition.</p>
                 </div>
               )}
-              
+
               {status && (
                 <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-indigo-600 text-white px-4 py-2 rounded-full text-xs font-bold animate-bounce shadow-xl">
                   {status}

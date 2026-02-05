@@ -3,15 +3,20 @@ package main
 import (
 	"crypto/md5"
 	"crypto/rand"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+//go:embed all:frontend/dist
+var frontendFS embed.FS
 
 // --- Models ---
 
@@ -130,15 +135,6 @@ func GetFolders(root string) ([]string, error) {
 	return folders, nil
 }
 
-// getAllowedOrigins returns the list of allowed CORS origins from environment or defaults
-func getAllowedOrigins() []string {
-	if origins := os.Getenv("CORS_ALLOWED_ORIGINS"); origins != "" {
-		return strings.Split(origins, ",")
-	}
-	// Default allowlist for development
-	return []string{"http://localhost:3000", "http://localhost:5173"}
-}
-
 // isOriginAllowed checks if the given origin is in the allowlist
 func isOriginAllowed(origin string, allowlist []string) bool {
 	for _, allowed := range allowlist {
@@ -149,9 +145,15 @@ func isOriginAllowed(origin string, allowlist []string) bool {
 	return false
 }
 
-// enableCors middleware to allow the React frontend to talk to Go
+// enableCors wraps a handler with CORS headers when CORS_ALLOWED_ORIGINS is set.
+// In production the frontend is embedded and served same-origin, so CORS is unnecessary.
+// Set CORS_ALLOWED_ORIGINS for dev mode when running the frontend dev server separately.
 func enableCors(next http.HandlerFunc) http.HandlerFunc {
-	allowedOrigins := getAllowedOrigins()
+	origins := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if origins == "" {
+		return next
+	}
+	allowedOrigins := strings.Split(origins, ",")
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" && isOriginAllowed(origin, allowedOrigins) {
@@ -183,6 +185,11 @@ func main() {
 		config.MusicRoot = envRoot
 	}
 
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	client := &SubsonicClient{
 		BaseURL:  config.NavidromeURL,
 		Username: config.Username,
@@ -191,7 +198,7 @@ func main() {
 
 	http.HandleFunc("/api/folders", enableCors(func(w http.ResponseWriter, r *http.Request) {
 		absFolders, err := GetFolders(config.MusicRoot)
-		
+
 		// Convert absolute paths to Navidrome relative paths for the frontend
 		var relativeFolders []string
 		if err != nil {
@@ -202,7 +209,7 @@ func main() {
 				relativeFolders = append(relativeFolders, mapToNavidromePath(abs, config.MusicRoot))
 			}
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(relativeFolders)
 	}))
@@ -235,8 +242,15 @@ func main() {
 		w.Write(data)
 	}))
 
-	fmt.Println("SmartyP Server starting on :8080...")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	// Serve embedded frontend for all non-API routes
+	frontendDist, err := fs.Sub(frontendFS, "frontend/dist")
+	if err != nil {
+		log.Fatalf("Failed to access embedded frontend: %v", err)
+	}
+	http.Handle("/", http.FileServer(http.FS(frontendDist)))
+
+	fmt.Printf("SmartyP Server starting on :%s...\n", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
 }

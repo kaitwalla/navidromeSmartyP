@@ -1,0 +1,10 @@
+# Build artifacts
+smartyp
+frontend/dist/
+frontend/node_modules/
+
+# Environment
+.env
+
+# OS
+.DS_Store

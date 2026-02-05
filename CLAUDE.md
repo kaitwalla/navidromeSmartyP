@@ -12,31 +12,57 @@ SmartyP is a web utility for creating Navidrome smart playlists based on filesys
 
 ## Architecture
 
+The application builds to a **single binary** that embeds the React frontend and serves everything on one port.
+
 ```
-Frontend (React)          Backend (Go)              Filesystem
-   :3000                     :8080
-     │                         │
-     ├── GET /api/folders ────►│──► Scans MUSIC_ROOT
-     │◄── JSON folder list ────┤
-     │                         │
-     ├── POST /api/generate ──►│──► GenerateSmartJSON()
-     │◄── Playlist JSON ───────┤
+┌─────────────────────────────────────────────────────┐
+│                  smartyp binary                     │
+│  ┌───────────────┐    ┌──────────────────────────┐  │
+│  │ Embedded      │    │ Go HTTP Server           │  │
+│  │ Frontend      │◄───│                          │  │
+│  │ (frontend/    │    │ GET /           → UI     │  │
+│  │  dist/)       │    │ GET /api/folders→ Scan   │  │
+│  └───────────────┘    │ POST /api/generate→ JSON │  │
+│                       └──────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                      Filesystem (MUSIC_ROOT)
 ```
 
 ## File Structure
 
 ```
 navidromeSmartyP/
-├── main.go          # Go backend server (HTTP API + filesystem scanning)
-├── main_test.go     # Go unit tests for path mapping and JSON generation
-├── app.jsx          # React frontend (dark-mode dashboard UI)
-├── readme.md        # Project readme
-└── CLAUDE.md        # This file
+├── main.go              # Go backend: HTTP API, embedded frontend, filesystem scanning
+├── main_test.go         # Go unit tests for path mapping and JSON generation
+├── go.mod               # Go module definition
+├── Makefile             # Build automation (build, test, clean, dev)
+├── .gitignore           # Ignores: smartyp binary, frontend/dist/, node_modules/
+├── .env.example         # Example environment configuration
+├── readme.md            # User-facing documentation
+├── CLAUDE.md            # This file (developer context)
+└── frontend/            # React frontend (Vite + Tailwind)
+    ├── package.json     # npm dependencies
+    ├── vite.config.js   # Vite config with dev proxy
+    ├── tailwind.config.js
+    ├── postcss.config.js
+    ├── index.html       # HTML shell
+    └── src/
+        ├── main.jsx     # React entry point
+        ├── index.css    # Tailwind imports
+        └── App.jsx      # Main React component (dark-mode dashboard UI)
 ```
 
 ## Key Source Files
 
 ### main.go (Backend)
+
+**Embedded Frontend:**
+```go
+//go:embed all:frontend/dist
+var frontendFS embed.FS
+```
 
 **Structs:**
 - `Config` - Navidrome URL, credentials, music root path
@@ -50,17 +76,20 @@ navidromeSmartyP/
 - `mapToNavidromePath(fullPath, musicRoot string)` - Converts absolute to relative paths
 - `GetFolders(musicRoot string)` - Scans Tier 1 folders + special Tier 2 for "Xmas"
 - `GenerateAuthParams()` - MD5-hashed Subsonic auth token generation
+- `enableCors()` - Conditional CORS middleware (only when `CORS_ALLOWED_ORIGINS` is set)
 
 **API Endpoints:**
+- `GET /` - Serves embedded frontend
 - `GET /api/folders` - Returns available music folders (relative paths)
 - `POST /api/generate` - Accepts `{name, path, minRating}`, returns playlist JSON
 
-**Default Config:**
-- Server port: `:8080`
-- Default MUSIC_ROOT: `/Volumes/Files - SSD/Music`
-- Environment variables: `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASS`, `MUSIC_ROOT`
+**Environment Variables:**
+- `MUSIC_ROOT` - Path to music library (required)
+- `PORT` - Server port (default: `8080`)
+- `CORS_ALLOWED_ORIGINS` - Enable CORS for dev mode (comma-separated origins)
+- `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASS` - Future API integration
 
-### app.jsx (Frontend)
+### frontend/src/App.jsx (Frontend)
 
 **State:**
 - `folders` - List of available music folders
@@ -70,16 +99,17 @@ navidromeSmartyP/
 - `generatedJson` - Output JSON string
 - `status`/`error` - User feedback
 
-**UI Components:**
-- Header with rescan button
-- Two-column layout: form + JSON preview
-- Form: text input, dropdown select, range slider
-- Copy to clipboard functionality
+**API Base:**
+```jsx
+const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+```
+In production (embedded), uses `/api`. In dev mode, can be overridden.
 
 **Dependencies:**
-- React + Hooks (useState, useEffect)
-- Tailwind CSS
+- React 18 + Hooks (useState, useEffect)
+- Tailwind CSS 3
 - Lucide React icons
+- Vite 5
 
 ## Generated Playlist JSON Format
 
@@ -96,23 +126,41 @@ navidromeSmartyP/
 }
 ```
 
-## Running Locally
+## Building & Running
 
-### Backend
+### Build Single Binary
 ```bash
-export MUSIC_ROOT="/path/to/music"  # Required
-go run main.go                       # Serves on :8080
+make build        # Builds frontend + Go binary → smartyp
 ```
 
-### Frontend
+### Run
 ```bash
-npm install
-npm start    # or npm run dev for Vite
+MUSIC_ROOT=/path/to/music ./smartyp
+# Or with custom port:
+PORT=9090 MUSIC_ROOT=/path/to/music ./smartyp
+```
+
+### Development Mode
+Run frontend and backend separately for hot reload:
+
+```bash
+# Terminal 1 - Backend
+CORS_ALLOWED_ORIGINS=http://localhost:5173 MUSIC_ROOT=/path/to/music go run main.go
+
+# Terminal 2 - Frontend
+cd frontend && npm install && npm run dev
 ```
 
 ### Tests
 ```bash
+make test         # Ensures dist exists, runs go test -v
+# Or directly (requires frontend/dist to exist):
 go test -v
+```
+
+### Clean
+```bash
+make clean        # Removes smartyp, frontend/dist/, frontend/node_modules/
 ```
 
 ## Special Behaviors
@@ -123,10 +171,13 @@ go test -v
 
 3. **Graceful Degradation** - Frontend shows mock data if backend unavailable
 
+4. **Conditional CORS** - CORS headers only added when `CORS_ALLOWED_ORIGINS` is set (for dev mode). Production builds are same-origin.
+
 ## Development Notes
 
-- No `go.mod` or `package.json` - dependencies not formally tracked
-- CORS enabled for all origins (`*`) - needs restriction for production
+- Single binary deployment: `go:embed` bundles `frontend/dist/` into the executable
+- `make ensure-dist` creates a placeholder dist so `go test` compiles without building frontend
+- Vite dev server proxies `/api` to `localhost:8080` for seamless development
 - Only `path` and `rating` filters implemented; other Navidrome smart playlist features not exposed
 - Subsonic API auth code exists but isn't actively used yet
 
@@ -135,7 +186,7 @@ go test -v
 ### Adding a new playlist rule type
 1. Update `Rule` struct in `main.go` if needed
 2. Modify `GenerateSmartJSON()` to include new rule
-3. Add UI controls in `app.jsx`
+3. Add UI controls in `frontend/src/App.jsx`
 
 ### Changing folder scan depth
 Look at `GetFolders()` in `main.go` - currently hardcoded for Tier 1 + special Tier 2 "Xmas"
