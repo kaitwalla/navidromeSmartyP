@@ -6,13 +6,16 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 //go:embed all:frontend/dist
@@ -47,9 +50,61 @@ type Rule struct {
 // --- Subsonic Client ---
 
 type SubsonicClient struct {
-	BaseURL  string
-	Username string
-	Password string
+	BaseURL    string
+	Username   string
+	Password   string
+	HTTPClient *http.Client
+}
+
+// SubsonicResponse represents the common wrapper for all Subsonic API responses
+type SubsonicResponse struct {
+	XMLName  xml.Name `xml:"subsonic-response"`
+	Status   string   `xml:"status,attr"`
+	Version  string   `xml:"version,attr"`
+	Error    *SubsonicError
+	ScanStatus *ScanStatus
+	Playlists  *PlaylistsWrapper
+}
+
+type SubsonicError struct {
+	Code    int    `xml:"code,attr"`
+	Message string `xml:"message,attr"`
+}
+
+type ScanStatus struct {
+	Scanning bool `xml:"scanning,attr"`
+	Count    int  `xml:"count,attr"`
+}
+
+type PlaylistsWrapper struct {
+	Playlist []SubsonicPlaylist `xml:"playlist"`
+}
+
+type SubsonicPlaylist struct {
+	ID        string `xml:"id,attr"`
+	Name      string `xml:"name,attr"`
+	SongCount int    `xml:"songCount,attr"`
+	Duration  int    `xml:"duration,attr"`
+	Owner     string `xml:"owner,attr"`
+	Public    bool   `xml:"public,attr"`
+}
+
+// SmartPlaylistInfo represents info about a .nsp file
+type SmartPlaylistInfo struct {
+	Name      string `json:"name"`
+	Filename  string `json:"filename"`
+	Path      string `json:"path"`
+	ModTime   string `json:"modTime"`
+}
+
+// StatusResponse represents the /api/status response
+type StatusResponse struct {
+	Connected       bool   `json:"connected"`
+	NavidromeURL    string `json:"navidromeUrl,omitempty"`
+	PlaylistPath    string `json:"playlistPath"`
+	MusicRoot       string `json:"musicRoot"`
+	ConfiguredUser  string `json:"configuredUser,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // GenerateAuthParams creates the required Subsonic auth tokens (u, t, s)
@@ -86,6 +141,197 @@ func (c *SubsonicClient) GenerateSmartJSON(playlistName string, relativePath str
 	}
 
 	return json.MarshalIndent(sp, "", "  ")
+}
+
+// getHTTPClient returns the client's HTTP client, initializing a default if needed
+func (c *SubsonicClient) getHTTPClient() *http.Client {
+	if c.HTTPClient == nil {
+		c.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	return c.HTTPClient
+}
+
+// makeRequest performs an authenticated request to the Subsonic API
+func (c *SubsonicClient) makeRequest(endpoint string) (*SubsonicResponse, error) {
+	if c.BaseURL == "" {
+		return nil, fmt.Errorf("Navidrome URL not configured")
+	}
+
+	authParams, err := c.GenerateAuthParams()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate auth params: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/rest/%s?%s", strings.TrimSuffix(c.BaseURL, "/"), endpoint, authParams)
+
+	resp, err := c.getHTTPClient().Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var subResp SubsonicResponse
+	if err := xml.Unmarshal(body, &subResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if subResp.Status != "ok" {
+		if subResp.Error != nil {
+			return nil, fmt.Errorf("Subsonic API error %d: %s", subResp.Error.Code, subResp.Error.Message)
+		}
+		return nil, fmt.Errorf("Subsonic API returned status: %s", subResp.Status)
+	}
+
+	return &subResp, nil
+}
+
+// Ping tests the connection to Navidrome
+func (c *SubsonicClient) Ping() error {
+	_, err := c.makeRequest("ping")
+	return err
+}
+
+// StartScan triggers a library rescan
+func (c *SubsonicClient) StartScan() error {
+	_, err := c.makeRequest("startScan")
+	return err
+}
+
+// GetScanStatus returns the current scan status
+func (c *SubsonicClient) GetScanStatus() (*ScanStatus, error) {
+	resp, err := c.makeRequest("getScanStatus")
+	if err != nil {
+		return nil, err
+	}
+	return resp.ScanStatus, nil
+}
+
+// GetPlaylists returns all playlists from Navidrome
+func (c *SubsonicClient) GetPlaylists() ([]SubsonicPlaylist, error) {
+	resp, err := c.makeRequest("getPlaylists")
+	if err != nil {
+		return nil, err
+	}
+	if resp.Playlists == nil {
+		return []SubsonicPlaylist{}, nil
+	}
+	return resp.Playlists.Playlist, nil
+}
+
+// --- Playlist File Management ---
+
+// getPlaylistPath returns the configured playlist directory path
+func getPlaylistPath(musicRoot string) string {
+	if envPath := os.Getenv("PLAYLIST_PATH"); envPath != "" {
+		return envPath
+	}
+	// Default to MUSIC_ROOT/playlists/
+	return filepath.Join(musicRoot, "playlists")
+}
+
+// ensurePlaylistDir creates the playlist directory if it doesn't exist
+func ensurePlaylistDir(path string) error {
+	return os.MkdirAll(path, 0755)
+}
+
+// WritePlaylistFile writes a .nsp file to the playlist directory
+func WritePlaylistFile(playlistPath, name string, content []byte) error {
+	if err := ensurePlaylistDir(playlistPath); err != nil {
+		return fmt.Errorf("failed to create playlist directory: %w", err)
+	}
+
+	// Sanitize filename
+	safeName := sanitizeFilename(name)
+	filename := filepath.Join(playlistPath, safeName+".nsp")
+
+	if err := os.WriteFile(filename, content, 0644); err != nil {
+		return fmt.Errorf("failed to write playlist file: %w", err)
+	}
+	return nil
+}
+
+// sanitizeFilename removes/replaces characters that aren't safe for filenames
+func sanitizeFilename(name string) string {
+	// Replace problematic characters
+	replacer := strings.NewReplacer(
+		"/", "-",
+		"\\", "-",
+		":", "-",
+		"*", "-",
+		"?", "",
+		"\"", "",
+		"<", "",
+		">", "",
+		"|", "-",
+	)
+	return strings.TrimSpace(replacer.Replace(name))
+}
+
+// ListSmartPlaylists scans the playlist directory for .nsp files
+func ListSmartPlaylists(playlistPath string) ([]SmartPlaylistInfo, error) {
+	if err := ensurePlaylistDir(playlistPath); err != nil {
+		return nil, fmt.Errorf("failed to access playlist directory: %w", err)
+	}
+
+	entries, err := os.ReadDir(playlistPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read playlist directory: %w", err)
+	}
+
+	var playlists []SmartPlaylistInfo
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".nsp") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		// Try to read the playlist name from the JSON
+		fullPath := filepath.Join(playlistPath, entry.Name())
+		name := strings.TrimSuffix(entry.Name(), ".nsp")
+
+		content, err := os.ReadFile(fullPath)
+		if err == nil {
+			var sp SmartPlaylist
+			if json.Unmarshal(content, &sp) == nil && sp.Name != "" {
+				name = sp.Name
+			}
+		}
+
+		playlists = append(playlists, SmartPlaylistInfo{
+			Name:     name,
+			Filename: entry.Name(),
+			Path:     fullPath,
+			ModTime:  info.ModTime().Format(time.RFC3339),
+		})
+	}
+	return playlists, nil
+}
+
+// DeleteSmartPlaylist removes a .nsp file
+func DeleteSmartPlaylist(playlistPath, filename string) error {
+	// Validate filename to prevent path traversal
+	if strings.Contains(filename, "/") || strings.Contains(filename, "\\") || strings.Contains(filename, "..") {
+		return fmt.Errorf("invalid filename")
+	}
+
+	if !strings.HasSuffix(filename, ".nsp") {
+		return fmt.Errorf("can only delete .nsp files")
+	}
+
+	fullPath := filepath.Join(playlistPath, filename)
+	if err := os.Remove(fullPath); err != nil {
+		return fmt.Errorf("failed to delete playlist: %w", err)
+	}
+	return nil
 }
 
 // --- Logic & Helpers ---
@@ -159,7 +405,7 @@ func enableCors(next http.HandlerFunc) http.HandlerFunc {
 		if origin != "" && isOriginAllowed(origin, allowedOrigins) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -190,11 +436,129 @@ func main() {
 		port = "8080"
 	}
 
+	playlistPath := getPlaylistPath(config.MusicRoot)
+
 	client := &SubsonicClient{
 		BaseURL:  config.NavidromeURL,
 		Username: config.Username,
 		Password: config.Password,
 	}
+
+	// GET /api/status - Returns Navidrome connection status & config
+	http.HandleFunc("/api/status", enableCors(func(w http.ResponseWriter, r *http.Request) {
+		status := StatusResponse{
+			PlaylistPath: playlistPath,
+			MusicRoot:    config.MusicRoot,
+		}
+
+		if config.NavidromeURL != "" {
+			status.NavidromeURL = config.NavidromeURL
+			status.ConfiguredUser = config.Username
+
+			if err := client.Ping(); err != nil {
+				status.Connected = false
+				status.Error = err.Error()
+			} else {
+				status.Connected = true
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status)
+	}))
+
+	// POST /api/deploy - Writes .nsp file + triggers startScan
+	http.HandleFunc("/api/deploy", enableCors(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Name      string `json:"name"`
+			Path      string `json:"path"`
+			MinRating int    `json:"minRating"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Generate the playlist JSON
+		data, err := client.GenerateSmartJSON(req.Name, req.Path, req.MinRating)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to generate playlist: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Write the .nsp file
+		if err := WritePlaylistFile(playlistPath, req.Name, data); err != nil {
+			http.Error(w, fmt.Sprintf("failed to write playlist file: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Trigger a rescan if Navidrome is configured
+		scanTriggered := false
+		var scanError string
+		if config.NavidromeURL != "" {
+			if err := client.StartScan(); err != nil {
+				scanError = err.Error()
+			} else {
+				scanTriggered = true
+			}
+		}
+
+		response := map[string]interface{}{
+			"success":       true,
+			"filename":      sanitizeFilename(req.Name) + ".nsp",
+			"path":          filepath.Join(playlistPath, sanitizeFilename(req.Name)+".nsp"),
+			"scanTriggered": scanTriggered,
+		}
+		if scanError != "" {
+			response["scanError"] = scanError
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+
+	// GET /api/playlists - Lists existing .nsp files in playlist dir
+	// DELETE /api/playlists?name=filename.nsp - Removes a .nsp file
+	http.HandleFunc("/api/playlists", enableCors(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			playlists, err := ListSmartPlaylists(playlistPath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(playlists)
+
+		case http.MethodDelete:
+			filename := r.URL.Query().Get("name")
+			if filename == "" {
+				http.Error(w, "missing 'name' query parameter", http.StatusBadRequest)
+				return
+			}
+
+			if err := DeleteSmartPlaylist(playlistPath, filename); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"deleted": filename,
+			})
+
+		default:
+			w.Header().Set("Allow", "GET, DELETE")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
 
 	http.HandleFunc("/api/folders", enableCors(func(w http.ResponseWriter, r *http.Request) {
 		absFolders, err := GetFolders(config.MusicRoot)

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Music, Save, RefreshCw, Folder, Star, Info, AlertCircle } from 'lucide-react';
+import { Settings, Music, Save, RefreshCw, Folder, Star, Info, AlertCircle, Upload, Trash2, CheckCircle, XCircle, Wifi, WifiOff, List } from 'lucide-react';
 
 const App = () => {
   const [folders, setFolders] = useState([]);
@@ -11,11 +11,44 @@ const App = () => {
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
 
+  // New state for Navidrome integration
+  const [connectionStatus, setConnectionStatus] = useState(null); // null = loading, object = status
+  const [existingPlaylists, setExistingPlaylists] = useState([]);
+  const [deploying, setDeploying] = useState(false);
+  const [showPlaylists, setShowPlaylists] = useState(false);
+
   const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
   useEffect(() => {
     fetchFolders();
+    fetchStatus();
+    fetchPlaylists();
   }, []);
+
+  const fetchStatus = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/status`);
+      if (response.ok) {
+        const data = await response.json();
+        setConnectionStatus(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch status", err);
+      setConnectionStatus({ connected: false, error: "Backend not reachable" });
+    }
+  };
+
+  const fetchPlaylists = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/playlists`);
+      if (response.ok) {
+        const data = await response.json();
+        setExistingPlaylists(data || []);
+      }
+    } catch (err) {
+      console.error("Failed to fetch playlists", err);
+    }
+  };
 
   const fetchFolders = async () => {
     setLoading(true);
@@ -64,6 +97,82 @@ const App = () => {
     }
   };
 
+  const handleDeploy = async () => {
+    setDeploying(true);
+    setStatus('Deploying...');
+    setError('');
+    try {
+      const payload = {
+        name: playlistName,
+        path: selectedFolder,
+        minRating: minRating
+      };
+
+      const response = await fetch(`${API_BASE}/deploy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(errText || "Deployment failed");
+      }
+
+      const result = await response.json();
+
+      // Also generate the JSON for display
+      const genResponse = await fetch(`${API_BASE}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (genResponse.ok) {
+        const genResult = await genResponse.json();
+        setGeneratedJson(JSON.stringify(genResult, null, 2));
+      }
+
+      let successMsg = `Deployed ${result.filename}!`;
+      if (result.scanTriggered) {
+        successMsg += ' Rescan triggered.';
+      } else if (result.scanError) {
+        successMsg += ` (Scan warning: ${result.scanError})`;
+      }
+      setStatus(successMsg);
+
+      // Refresh playlist list
+      fetchPlaylists();
+
+      setTimeout(() => setStatus(''), 5000);
+    } catch (err) {
+      setStatus('Deployment failed.');
+      setError(err.message);
+    } finally {
+      setDeploying(false);
+    }
+  };
+
+  const handleDeletePlaylist = async (filename) => {
+    if (!window.confirm(`Delete ${filename}?`)) return;
+
+    try {
+      const response = await fetch(`${API_BASE}/playlists?name=${encodeURIComponent(filename)}`, {
+        method: 'DELETE'
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(errText || "Delete failed");
+      }
+
+      setStatus(`Deleted ${filename}`);
+      fetchPlaylists();
+      setTimeout(() => setStatus(''), 3000);
+    } catch (err) {
+      setError(`Failed to delete: ${err.message}`);
+    }
+  };
+
   const copyToClipboard = async () => {
     try {
       if (navigator.clipboard) {
@@ -85,6 +194,38 @@ const App = () => {
     }
   };
 
+  // Connection status banner component
+  const ConnectionBanner = () => {
+    if (connectionStatus === null) return null;
+
+    const hasNavidromeConfig = connectionStatus.navidromeUrl;
+
+    if (!hasNavidromeConfig) {
+      return (
+        <div className="bg-yellow-900/30 border border-yellow-500/50 text-yellow-200 p-3 rounded-lg mb-6 flex items-center gap-2">
+          <WifiOff size={18} />
+          <span>Navidrome not configured. Set NAVIDROME_URL to enable direct deployment.</span>
+        </div>
+      );
+    }
+
+    if (connectionStatus.connected) {
+      return (
+        <div className="bg-green-900/30 border border-green-500/50 text-green-200 p-3 rounded-lg mb-6 flex items-center gap-2">
+          <Wifi size={18} />
+          <span>Connected to Navidrome ({connectionStatus.navidromeUrl})</span>
+        </div>
+      );
+    }
+
+    return (
+      <div className="bg-red-900/30 border border-red-500/50 text-red-200 p-3 rounded-lg mb-6 flex items-center gap-2">
+        <XCircle size={18} />
+        <span>Cannot connect to Navidrome: {connectionStatus.error}</span>
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 p-4 md:p-8 font-sans">
       <div className="max-w-4xl mx-auto">
@@ -99,20 +240,69 @@ const App = () => {
               <p className="text-slate-400 text-sm">Navidrome Smart Playlist Utility</p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={fetchFolders}
-            className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400"
-            title="Rescan Folders"
-          >
-            <RefreshCw size={20} className={loading ? "animate-spin" : ""} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowPlaylists(!showPlaylists)}
+              className={`p-2 rounded-full transition-colors ${showPlaylists ? 'bg-indigo-600 text-white' : 'hover:bg-slate-800 text-slate-400'}`}
+              title="Manage Playlists"
+            >
+              <List size={20} />
+            </button>
+            <button
+              type="button"
+              onClick={() => { fetchFolders(); fetchStatus(); fetchPlaylists(); }}
+              className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400"
+              title="Refresh"
+            >
+              <RefreshCw size={20} className={loading ? "animate-spin" : ""} />
+            </button>
+          </div>
         </header>
+
+        {/* Connection Status Banner */}
+        <ConnectionBanner />
 
         {error && (
           <div className="bg-red-900/30 border border-red-500/50 text-red-200 p-3 rounded-lg mb-6 flex items-center gap-2">
             <AlertCircle size={18} />
             {error}
+          </div>
+        )}
+
+        {/* Existing Playlists Panel */}
+        {showPlaylists && (
+          <div className="bg-slate-800/50 p-6 rounded-xl border border-slate-700 shadow-xl mb-6">
+            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <List size={18} className="text-indigo-400" />
+              Deployed Smart Playlists
+              <span className="text-xs text-slate-500 font-normal ml-2">
+                {connectionStatus?.playlistPath}
+              </span>
+            </h2>
+
+            {existingPlaylists.length === 0 ? (
+              <p className="text-slate-500 text-sm">No smart playlists found.</p>
+            ) : (
+              <div className="space-y-2">
+                {existingPlaylists.map((pl) => (
+                  <div key={pl.filename} className="flex items-center justify-between bg-slate-900/50 p-3 rounded-lg">
+                    <div>
+                      <span className="font-medium">{pl.name}</span>
+                      <span className="text-xs text-slate-500 ml-2">{pl.filename}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleDeletePlaylist(pl.filename)}
+                      className="p-2 text-red-400 hover:text-red-300 hover:bg-red-900/30 rounded transition-colors"
+                      title="Delete playlist"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -179,23 +369,34 @@ const App = () => {
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={handleGenerate}
-                disabled={loading}
-                className="w-full mt-8 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg active:scale-[0.98]"
-              >
-                <Save size={18} />
-                Generate Definition
-              </button>
+              <div className="mt-8 space-y-3">
+                <button
+                  type="button"
+                  onClick={handleDeploy}
+                  disabled={loading || deploying}
+                  className="w-full bg-green-600 hover:bg-green-500 disabled:bg-slate-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg active:scale-[0.98]"
+                >
+                  <Upload size={18} />
+                  {deploying ? 'Deploying...' : 'Deploy to Navidrome'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleGenerate}
+                  disabled={loading}
+                  className="w-full bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 text-white font-medium py-2 rounded-lg flex items-center justify-center gap-2 transition-all"
+                >
+                  <Save size={16} />
+                  Generate JSON Only
+                </button>
+              </div>
             </div>
 
             <div className="bg-indigo-900/20 p-4 rounded-lg border border-indigo-500/30 flex gap-3 text-sm text-indigo-200">
               <Info size={20} className="shrink-0 text-indigo-400" />
               <p>
-                Navidrome smart playlists are JSON files. After generating, save this output to your Navidrome
-                <code className="bg-indigo-900/40 px-1 rounded ml-1">playlists/</code> directory as
-                <code className="bg-indigo-900/40 px-1 rounded ml-1">.json</code>.
+                <strong>Deploy</strong> writes the playlist directly to Navidrome and triggers a library rescan.
+                <strong className="block mt-1">Generate JSON Only</strong> lets you preview/copy the definition manually.
               </p>
             </div>
           </div>
@@ -224,7 +425,7 @@ const App = () => {
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-slate-600 text-center p-8">
                   <div className="mb-3 opacity-20"><Music size={48} /></div>
-                  <p>Configure filters and click generate to see the Navidrome smart playlist definition.</p>
+                  <p>Configure filters and click generate or deploy to see the Navidrome smart playlist definition.</p>
                 </div>
               )}
 

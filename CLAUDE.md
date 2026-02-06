@@ -7,27 +7,32 @@ SmartyP is a web utility for creating Navidrome smart playlists based on filesys
 **Core workflow:**
 1. User selects a music folder (e.g., "Rock", "Xmas/Traditional")
 2. Sets a minimum star rating filter (1-5 stars)
-3. Generates Navidrome-compatible JSON playlist definition
-4. Manually deploys JSON to Navidrome's playlist directory
+3. Click "Deploy to Navidrome" to write `.nsp` file and trigger rescan
+   - Or use "Generate JSON Only" to preview/copy manually
 
 ## Architecture
 
 The application builds to a **single binary** that embeds the React frontend and serves everything on one port.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  smartyp binary                     │
-│  ┌───────────────┐    ┌──────────────────────────┐  │
-│  │ Embedded      │    │ Go HTTP Server           │  │
-│  │ Frontend      │◄───│                          │  │
-│  │ (frontend/    │    │ GET /           → UI     │  │
-│  │  dist/)       │    │ GET /api/folders→ Scan   │  │
-│  └───────────────┘    │ POST /api/generate→ JSON │  │
-│                       └──────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                      Filesystem (MUSIC_ROOT)
+┌──────────────────────────────────────────────────────────┐
+│                     smartyp binary                        │
+│  ┌───────────────┐    ┌───────────────────────────────┐  │
+│  │ Embedded      │    │ Go HTTP Server                │  │
+│  │ Frontend      │◄───│                               │  │
+│  │ (frontend/    │    │ GET /            → UI         │  │
+│  │  dist/)       │    │ GET /api/status  → Connection │  │
+│  └───────────────┘    │ GET /api/folders → Scan       │  │
+│                       │ POST /api/generate→ JSON      │  │
+│                       │ POST /api/deploy → Write+Scan │  │
+│                       │ GET /api/playlists→ List NSP  │  │
+│                       │ DELETE /api/playlists→ Remove │  │
+│                       └───────────────────────────────┘  │
+└──────────────────────────────────────────────────────────┘
+         │                              │
+         ▼                              ▼
+  Filesystem (MUSIC_ROOT)       Navidrome (Subsonic API)
+  └── playlists/*.nsp           └── ping, startScan
 ```
 
 ## File Structure
@@ -69,7 +74,10 @@ var frontendFS embed.FS
 - `SmartPlaylist` - Playlist with name, comment, and rules
 - `PlaylistRule` - Contains `All`/`Any` rule arrays
 - `Rule` - Individual filter (name, operator, value)
-- `SubsonicClient` - Subsonic/Navidrome API client (prepared for future use)
+- `SubsonicClient` - Subsonic/Navidrome API client with Ping, StartScan, GetPlaylists
+- `SubsonicResponse` - XML response wrapper for Subsonic API
+- `SmartPlaylistInfo` - Info about a .nsp file (name, filename, path, modTime)
+- `StatusResponse` - Connection status for /api/status endpoint
 
 **Key Functions:**
 - `GenerateSmartJSON(name, path, minRating string)` - Creates Navidrome playlist JSON
@@ -77,17 +85,30 @@ var frontendFS embed.FS
 - `GetFolders(musicRoot string)` - Scans Tier 1 folders + special Tier 2 for "Xmas"
 - `GenerateAuthParams()` - MD5-hashed Subsonic auth token generation
 - `enableCors()` - Conditional CORS middleware (only when `CORS_ALLOWED_ORIGINS` is set)
+- `Ping()` - Tests connection to Navidrome via Subsonic API
+- `StartScan()` - Triggers Navidrome library rescan
+- `WritePlaylistFile(path, name, content)` - Writes .nsp file to playlist directory
+- `ListSmartPlaylists(path)` - Returns list of .nsp files with metadata
+- `DeleteSmartPlaylist(path, filename)` - Removes a .nsp file (with path traversal protection)
+- `getPlaylistPath(musicRoot)` - Returns playlist directory (PLAYLIST_PATH or MUSIC_ROOT/playlists/)
 
 **API Endpoints:**
 - `GET /` - Serves embedded frontend
+- `GET /api/status` - Returns connection status, config info (playlistPath, musicRoot, connected)
 - `GET /api/folders` - Returns available music folders (relative paths)
 - `POST /api/generate` - Accepts `{name, path, minRating}`, returns playlist JSON
+- `POST /api/deploy` - Writes .nsp file + triggers startScan, returns `{success, filename, scanTriggered}`
+- `GET /api/playlists` - Lists existing .nsp files with metadata
+- `DELETE /api/playlists?name=file.nsp` - Removes a .nsp file
 
 **Environment Variables:**
 - `MUSIC_ROOT` - Path to music library (required)
 - `PORT` - Server port (default: `8080`)
 - `CORS_ALLOWED_ORIGINS` - Enable CORS for dev mode (comma-separated origins)
-- `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASS` - Future API integration
+- `NAVIDROME_URL` - Navidrome server URL (required for deploy/rescan features)
+- `NAVIDROME_USER` - Navidrome username
+- `NAVIDROME_PASS` - Navidrome password
+- `PLAYLIST_PATH` - Custom playlist directory (default: `MUSIC_ROOT/playlists/`)
 
 ### frontend/src/App.jsx (Frontend)
 
@@ -98,6 +119,10 @@ var frontendFS embed.FS
 - `minRating` - 1-5 star rating (slider)
 - `generatedJson` - Output JSON string
 - `status`/`error` - User feedback
+- `connectionStatus` - Navidrome connection info (connected, navidromeUrl, playlistPath)
+- `existingPlaylists` - List of deployed .nsp files
+- `deploying` - Loading state for deploy button
+- `showPlaylists` - Toggle for playlist manager panel
 
 **API Base:**
 ```jsx
@@ -179,7 +204,9 @@ make clean        # Removes smartyp, frontend/dist/, frontend/node_modules/
 - `make ensure-dist` creates a placeholder dist so `go test` compiles without building frontend
 - Vite dev server proxies `/api` to `localhost:8080` for seamless development
 - Only `path` and `rating` filters implemented; other Navidrome smart playlist features not exposed
-- Subsonic API auth code exists but isn't actively used yet
+- Subsonic API integration uses `ping` for connection testing and `startScan` for library rescan
+- Playlist files use `.nsp` extension (Navidrome Smart Playlist)
+- Filename sanitization prevents path traversal and removes unsafe characters
 
 ## Common Tasks
 
@@ -191,5 +218,8 @@ make clean        # Removes smartyp, frontend/dist/, frontend/node_modules/
 ### Changing folder scan depth
 Look at `GetFolders()` in `main.go` - currently hardcoded for Tier 1 + special Tier 2 "Xmas"
 
-### Adding Navidrome API integration
-`SubsonicClient` and `GenerateAuthParams()` are ready; implement actual API calls using these
+### Adding more Subsonic API calls
+Extend `SubsonicClient` with new methods following the pattern in `makeRequest()`. Add corresponding XML response structs and parse them in the method.
+
+### Changing playlist directory
+Set `PLAYLIST_PATH` environment variable, or modify `getPlaylistPath()` in `main.go` for different default behavior.
